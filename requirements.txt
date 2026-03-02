@@ -1,0 +1,11 @@
+## 📄 File 4 — Save as `requirements.txt`
+streamlit
+streamlit-folium
+folium
+scikit-learn
+xgboost
+pandas
+numpy
+matplotlib
+plotly
+joblib
