@@ -1,392 +1,347 @@
 """
-dashboard.py - Fixed Version
-Fixes:
-  1. Added J3_Flow and Station_Flow to history log
-  2. Fixed map display
+Power Grid Command Center — Streamlit Dashboard
+Wired to GridHealthEngine (engine.py):
+  - Isolation Forest anomaly detection
+  - IEEE/ANSI rule engine
+  - Diagnostic layer (primary driver identification)
+  - Live simulation through CSV rows
+
+Run:  streamlit run dashboard.py
+Deps: pip install streamlit plotly pandas scikit-learn joblib
+Place in same folder as engine.py and your v5 CSVs.
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
-import folium
-from streamlit_folium import st_folium
-import plotly.graph_objects as go
+import os, time, sys
 from datetime import datetime
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="💧 Water Pipeline Monitor", layout="wide")
+sys.path.insert(0, ".")
+from engine import GridHealthEngine
+
+st.set_page_config(
+    page_title="Grid Command Center",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 st.markdown("""
 <style>
-.status-normal   { background:#1a3a2a; border-left:5px solid #4CAF50;
-                   padding:14px; border-radius:8px; color:#4CAF50;
-                   font-size:22px; font-weight:bold; margin-bottom:10px;}
-.status-moderate { background:#3a2d1a; border-left:5px solid #FF9800;
-                   padding:14px; border-radius:8px; color:#FF9800;
-                   font-size:22px; font-weight:bold; margin-bottom:10px;}
-.status-critical { background:#3a1a1a; border-left:5px solid #F44336;
-                   padding:14px; border-radius:8px; color:#F44336;
-                   font-size:22px; font-weight:bold; margin-bottom:10px;}
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap');
+html, body, [class*="css"] { font-family: 'Rajdhani', sans-serif; }
+.stApp { background-color: #060a10; color: #c8d8e8; }
+section[data-testid="stSidebar"] { background: #080c14; border-right: 1px solid #0f1e30; }
+.asset-card {
+    background: linear-gradient(160deg, #0a1220 0%, #0c1628 100%);
+    border: 1px solid #132035; border-radius: 8px;
+    padding: 16px 18px; margin-bottom: 8px;
+    position: relative; overflow: hidden;
+}
+.asset-card::after { content:''; position:absolute; top:0; left:0; right:0; height:2px; }
+.asset-card.healthy::after  { background: linear-gradient(90deg,#00e676,#00bcd4); }
+.asset-card.warning::after  { background: linear-gradient(90deg,#ff9800,#ff5722); }
+.asset-card.critical::after { background: linear-gradient(90deg,#f44336,#e91e63);
+                               box-shadow: 0 0 20px rgba(244,67,54,0.4); }
+.card-label  { font-size:10px; letter-spacing:2.5px; text-transform:uppercase;
+               color:#2a5a7a; font-weight:600; margin-bottom:4px; }
+.card-status { font-size:20px; font-weight:700; letter-spacing:1px; }
+.card-status.healthy  { color:#00e676; }
+.card-status.warning  { color:#ff9800; }
+.card-status.critical { color:#f44336; }
+.card-detail { font-size:11px; color:#4a7a9a; margin-top:6px; line-height:1.5;
+               font-family:'JetBrains Mono',monospace; }
+.card-ai     { font-size:10px; color:#1a4060; margin-top:8px; padding-top:6px;
+               border-top:1px solid #0f1e30; font-family:'JetBrains Mono',monospace; }
+.card-ai.anomaly { color:#ff6b35; }
+.metric-badge { display:inline-block; padding:2px 8px; border-radius:3px;
+                font-size:10px; font-family:'JetBrains Mono',monospace;
+                margin-right:4px; margin-top:2px; }
+.mb-healthy  { background:#001a0a; color:#00e676; border:1px solid #00e67630; }
+.mb-warning  { background:#1a0e00; color:#ff9800; border:1px solid #ff980030; }
+.mb-critical { background:#1a0000; color:#f44336; border:1px solid #f4433630; }
+.sec-head { font-size:10px; letter-spacing:3px; text-transform:uppercase;
+            color:#1a4060; border-bottom:1px solid #0f1e30;
+            padding-bottom:6px; margin-bottom:12px; font-weight:600; }
+.alert-row { padding:8px 12px; border-radius:5px; margin-bottom:4px;
+             font-family:'JetBrains Mono',monospace; font-size:11px;
+             border-left:3px solid; line-height:1.6; }
+.alert-row.warning  { background:#120e00; border-color:#ff9800; color:#ffb74d; }
+.alert-row.critical { background:#120000; border-color:#f44336; color:#ef9a9a; }
+.score-bar-bg   { background:#0a1520; border-radius:3px; height:4px; width:100%; margin-top:6px; }
+.score-bar-fill { height:4px; border-radius:3px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("💧 Water Pipeline Health Monitor")
-st.caption("Station → J1 → J2 → J3 → Home")
-
-# ─────────────────────────────────────────────
-# LOAD MODEL
-# ─────────────────────────────────────────────
-@st.cache_resource
-def load_model():
-    try:
-        model    = joblib.load("model/pipeline_model.pkl")
-        scaler   = joblib.load("model/scaler.pkl")
-        features = joblib.load("model/features.pkl")
-        return model, scaler, features
-    except:
-        return None, None, None
-
-model, scaler, features = load_model()
-if model is None:
-    st.warning("⚠️ Model not found! Please run train.py first.")
-
-# ─────────────────────────────────────────────
-# JUNCTION COORDINATES
-# Change these to your actual city coordinates
-# ─────────────────────────────────────────────
-COORDS = {
-    "Station": [13.0827, 80.2707],
-    "J1":      [13.0850, 80.2750],
-    "J2":      [13.0870, 80.2800],
-    "J3":      [13.0900, 80.2850],
-    "Home":    [13.0920, 80.2900],
+ASSETS = {
+    "TRANSFORMER": {
+        "file":     "transformers_v5.csv",
+        "features": ["oil_temp_c","load_pct","vibration_um"],
+        "units":    {"oil_temp_c":"C","load_pct":"%","vibration_um":"um"},
+        "icon": "🔌", "label": "Transformer",
+        "ids":  [f"TRF-{i:02d}" for i in range(1,6)],
+    },
+    "SUBSTATION": {
+        "file":     "substations_v5.csv",
+        "features": ["sf6_pressure_bar","busbar_temp_c","voltage_stability_pu"],
+        "units":    {"sf6_pressure_bar":"bar","busbar_temp_c":"C","voltage_stability_pu":"pu"},
+        "icon": "🏭", "label": "Substation",
+        "ids":  [f"SUB-{i:02d}" for i in range(1,4)],
+    },
+    "POWER_LINE": {
+        "file":     "powerlines_v5.csv",
+        "features": ["current_pct_rated","ground_clearance_ft"],
+        "units":    {"current_pct_rated":"%","ground_clearance_ft":"ft"},
+        "icon": "⚡", "label": "Power Line",
+        "ids":  [f"PL-{i:02d}" for i in range(1,9)],
+    },
 }
 
-STATUS_COLOR = {"Normal": "#4CAF50", "Moderate": "#FF9800", "Critical": "#F44336"}
-STATUS_ICON  = {"Normal": "✅", "Moderate": "⚠️", "Critical": "🚨"}
-LABELS       = ["Normal", "Moderate", "Critical"]
+STATUS_COLOR = {"HEALTHY":"#00e676","WARNING":"#ff9800","CRITICAL":"#f44336"}
+STATUS_ICON  = {"HEALTHY":"✅","WARNING":"⚠️","CRITICAL":"🔴"}
+STATUS_CLASS = {"HEALTHY":"healthy","WARNING":"warning","CRITICAL":"critical"}
 
-# Session state
+@st.cache_resource
+def load_resources():
+    engine = GridHealthEngine()
+    for key, cfg in ASSETS.items():
+        if key not in engine.models and os.path.exists(cfg["file"]):
+            engine.train_asset_model(key, cfg["file"])
+    dfs = {}
+    for key, cfg in ASSETS.items():
+        if os.path.exists(cfg["file"]):
+            dfs[key] = pd.read_csv(cfg["file"])
+    return engine, dfs
+
+engine, dfs = load_resources()
+
+if "idx"     not in st.session_state: st.session_state.idx     = 0
+if "running" not in st.session_state: st.session_state.running = False
+if "alerts"  not in st.session_state: st.session_state.alerts  = []
 if "history" not in st.session_state:
-    st.session_state.history = []
+    st.session_state.history = {k: [] for k in ASSETS}
 
-# ─────────────────────────────────────────────
-# SIDEBAR — SENSOR INPUTS
-# ─────────────────────────────────────────────
-st.sidebar.title("🎛️ Enter Sensor Readings")
+def get_analysis(idx):
+    out = {}
+    for key, cfg in ASSETS.items():
+        if key not in dfs: continue
+        row     = dfs[key].iloc[idx % len(dfs[key])]
+        metrics = {f: float(row[f]) for f in cfg["features"] if f in row.index}
+        res     = engine.analyze_health(key, metrics)
+        res["metrics"]   = metrics
+        res["asset_id"]  = row.get("asset_id", cfg["ids"][idx % len(cfg["ids"])])
+        res["timestamp"] = row.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        out[key] = res
+    return out
 
-st.sidebar.markdown("#### 📍 Station")
-sta_p = st.sidebar.number_input("Station Pressure (m)", value=60.0, step=0.1, key="sta_p")
-sta_f = st.sidebar.number_input("Station Flow (L/s)",   value=8.5,  step=0.1, key="sta_f")
+with st.sidebar:
+    st.markdown("## ⚡ Grid Command")
+    st.markdown("---")
+    st.markdown("### Simulation")
+    speed = st.select_slider("Speed", ["Slow (2s)","Normal (1s)","Fast (0.3s)"], value="Normal (1s)")
+    speed_map = {"Slow (2s)":2.0,"Normal (1s)":1.0,"Fast (0.3s)":0.3}
 
-st.sidebar.markdown("#### 🔵 Junction 1")
-j1_p  = st.sidebar.number_input("J1 Pressure (m)",  value=52.0, step=0.1, key="j1_p")
-j1_f  = st.sidebar.number_input("J1→J2 Flow (L/s)", value=7.2,  step=0.1, key="j1_f")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("▶ Start", use_container_width=True, type="primary"):
+            st.session_state.running = True
+    with c2:
+        if st.button("⏹ Stop", use_container_width=True):
+            st.session_state.running = False
+    if st.button("↺ Reset", use_container_width=True):
+        st.session_state.idx     = 0
+        st.session_state.alerts  = []
+        st.session_state.history = {k: [] for k in ASSETS}
+        st.session_state.running = False
 
-st.sidebar.markdown("#### 🔵 Junction 2")
-j2_p  = st.sidebar.number_input("J2 Pressure (m)",  value=46.0, step=0.1, key="j2_p")
-j2_f  = st.sidebar.number_input("J2→J3 Flow (L/s)", value=6.1,  step=0.1, key="j2_f")
+    st.markdown("---")
+    show_assets = st.multiselect("Assets", list(ASSETS.keys()),
+                                 default=list(ASSETS.keys()),
+                                 format_func=lambda k: ASSETS[k]["label"])
+    show_warn = st.checkbox("Warnings", value=True)
+    show_crit = st.checkbox("Critical",  value=True)
+    st.markdown("---")
+    total = min((len(d) for d in dfs.values()), default=5000)
+    st.progress(min(st.session_state.idx / total, 1.0))
+    st.markdown(f"<div style='font-family:JetBrains Mono;font-size:10px;color:#1a4060;'>"
+                f"Step {st.session_state.idx} / {total}</div>", unsafe_allow_html=True)
+    st.markdown("---")
+    st.markdown("<div style='font-family:JetBrains Mono;font-size:10px;color:#0f2030;'>"
+                "Engine: Isolation Forest + IEEE Rules<br>Validator: RF max_depth=10</div>",
+                unsafe_allow_html=True)
 
-st.sidebar.markdown("#### 🔵 Junction 3")
-j3_p  = st.sidebar.number_input("J3 Pressure (m)",    value=40.0, step=0.1, key="j3_p")
-j3_f  = st.sidebar.number_input("J3→Home Flow (L/s)", value=5.0,  step=0.1, key="j3_f")
+if st.session_state.running and dfs:
+    analysis = get_analysis(st.session_state.idx)
+    for key, res in analysis.items():
+        cfg = ASSETS[key]
+        entry = {"idx": st.session_state.idx, "status": res["overall_status"],
+                 "ai": res["ai_analysis"]["anomaly_detected"], **res["metrics"]}
+        st.session_state.history[key].append(entry)
+        if len(st.session_state.history[key]) > 120:
+            st.session_state.history[key].pop(0)
+        if res["overall_status"] in ("WARNING","CRITICAL"):
+            st.session_state.alerts.insert(0, {
+                "time": res["timestamp"], "asset": cfg["label"],
+                "id": res["asset_id"], "status": res["overall_status"],
+                "detail": res["status_details"], "ai": res["ai_analysis"],
+                "metrics": res["metrics"], "units": cfg["units"],
+            })
+    st.session_state.alerts = st.session_state.alerts[:300]
+    st.session_state.idx += 1
 
-st.sidebar.markdown("#### 🏠 Home")
-home_p = st.sidebar.number_input("Home Pressure (m)", value=35.0, step=0.1, key="home_p")
+current = get_analysis(st.session_state.idx)
 
-btn = st.sidebar.button("🔍 Analyze & Predict", use_container_width=True)
+st.markdown("""
+<h1 style='font-family:Rajdhani;font-size:28px;font-weight:700;
+           color:#c8d8e8;margin-bottom:2px;letter-spacing:2px;'>
+    ⚡ POWER GRID COMMAND CENTER
+</h1>
+<p style='font-family:JetBrains Mono;font-size:10px;color:#1a4060;margin-top:0;'>
+    Hybrid Detection: IEEE/ANSI Rule Engine + Isolation Forest AI
+</p>
+""", unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────
-# HELPER FUNCTIONS
-# ─────────────────────────────────────────────
-def get_node_status(pressure, base):
-    ratio = pressure / base
-    if ratio < 0.70:   return "Critical"
-    elif ratio < 0.85: return "Moderate"
-    return "Normal"
+st.markdown("<div class='sec-head'>ASSET STATUS</div>", unsafe_allow_html=True)
+cols = st.columns(max(1, len(show_assets)))
+for col, key in zip(cols, show_assets):
+    if key not in current: continue
+    res = current[key]
+    cfg = ASSETS[key]
+    cls = STATUS_CLASS[res["overall_status"]]
+    ai  = res["ai_analysis"]
 
-def build_map(node_statuses):
-    m = folium.Map(
-        location=[13.0875, 80.2800],
-        zoom_start=14,
-        tiles="CartoDB dark_matter"
+    badge_html = "".join(
+        f"<span class='metric-badge mb-{cls}'>{f.replace('_',' ')}: {round(v,2)}{cfg['units'].get(f,'')}</span>"
+        for f, v in res["metrics"].items()
     )
+    score_norm  = min(100, max(0, int((ai["normality_score"] + 0.2) / 0.4 * 100)))
+    score_color = "#f44336" if ai["anomaly_detected"] else "#00e676"
+    ai_cls      = "anomaly" if ai["anomaly_detected"] else ""
+    ai_txt      = f"AI: {'ANOMALY' if ai['anomaly_detected'] else 'NORMAL'} | score {ai['normality_score']} | {ai['confidence']}"
+    detail_txt  = res["status_details"][:140]
 
-    prev_coord = None
-    for node, coord in COORDS.items():
-        status = node_statuses.get(node, "Normal")
-        color  = STATUS_COLOR[status]
-
-        # Draw pipe between nodes
-        if prev_coord:
-            folium.PolyLine(
-                locations=[prev_coord, coord],
-                color=color,
-                weight=6,
-                opacity=0.85,
-                dash_array=None if status == "Normal" else "8"
-            ).add_to(m)
-
-        # Draw junction circle
-        folium.CircleMarker(
-            location=coord,
-            radius=16,
-            color="white",
-            weight=2,
-            fill=True,
-            fill_color=color,
-            fill_opacity=0.9,
-            tooltip=f"{node}: {status}",
-            popup=folium.Popup(
-                f"<b>{node}</b><br>Status: <b style='color:{color}'>{status}</b>",
-                max_width=150
-            )
-        ).add_to(m)
-
-        # Node label
-        folium.Marker(
-            location=[coord[0] + 0.0006, coord[1]],
-            icon=folium.DivIcon(html=f"""
-                <div style='font-size:12px; font-weight:bold; color:white;
-                            background:{color}; border-radius:5px;
-                            padding:3px 8px; white-space:nowrap;
-                            box-shadow:0 2px 4px rgba(0,0,0,0.5);'>
-                    {node}
-                </div>
-            """)
-        ).add_to(m)
-
-        prev_coord = coord
-
-    # Legend
-    legend = """
-    <div style='position:fixed; bottom:25px; left:25px; z-index:9999;
-                background:#1e2130; border-radius:8px; padding:10px 14px;
-                color:white; font-family:Arial; font-size:12px;
-                box-shadow:0 2px 8px rgba(0,0,0,0.6);'>
-        <b style='font-size:13px;'>Pipeline Status</b><br><br>
-        <span style='color:#4CAF50; font-size:16px;'>●</span> Normal<br>
-        <span style='color:#FF9800; font-size:16px;'>●</span> Moderate Leak<br>
-        <span style='color:#F44336; font-size:16px;'>●</span> Critical Leak
-    </div>
-    """
-    m.get_root().html.add_child(folium.Element(legend))
-    return m
-
-# ─────────────────────────────────────────────
-# PREDICTION + DISPLAY
-# ─────────────────────────────────────────────
-if btn:
-    inp = {
-        "Station_pressure": sta_p,
-        "J1_pressure":      j1_p,
-        "J2_pressure":      j2_p,
-        "J3_pressure":      j3_p,
-        "Home_pressure":    home_p,
-        "Flow_Sta_J1":      sta_f,
-        "Flow_J1_J2":       j1_f,
-        "Flow_J2_J3":       j2_f,
-        "Flow_J3_Home":     j3_f,
-        "Pressure_drop_J1": sta_p - j1_p,
-        "Pressure_drop_J2": j1_p  - j2_p,
-        "Pressure_drop_J3": j2_p  - j3_p,
-        "Flow_loss_J1J2":   sta_f - j1_f,
-        "Flow_loss_J2J3":   j1_f  - j2_f,
-    }
-
-    # Rule-based check (pressure drop % from baseline)
-    j1_drop  = (52.0  - j1_p)  / 52.0
-    j2_drop  = (46.0  - j2_p)  / 46.0
-    j3_drop  = (40.0  - j3_p)  / 40.0
-    hp_drop  = (35.0  - home_p)/ 35.0
-    max_drop = max(j1_drop, j2_drop, j3_drop, hp_drop)
-    if max_drop >= 0.30:
-        rule_pred = 2
-    elif max_drop >= 0.15:
-        rule_pred = 1
-    else:
-        rule_pred = 0
-
-    # ML Prediction
-    if model:
-        row     = [inp[f] for f in features]
-        X       = scaler.transform([row])
-        ml_pred = int(model.predict(X)[0])
-        prob    = model.predict_proba(X)[0].tolist()
-    else:
-        ml_pred = rule_pred
-        prob    = [0.85,0.10,0.05] if ml_pred==0 else [0.10,0.80,0.10] if ml_pred==1 else [0.05,0.10,0.85]
-
-    # Final: take WORST of ML vs Rule so map and result always agree
-    pred = max(ml_pred, rule_pred)
-    if pred != ml_pred:
-        prob = [0.05,0.10,0.85] if pred==2 else [0.10,0.80,0.10]
-
-    status = LABELS[pred]
-    color  = STATUS_COLOR[status]
-    icon   = STATUS_ICON[status]
-
-    # Node statuses for map
-    node_statuses = {
-        "Station": "Normal",
-        "J1":      get_node_status(j1_p,   52.0),
-        "J2":      get_node_status(j2_p,   46.0),
-        "J3":      get_node_status(j3_p,   40.0),
-        "Home":    get_node_status(home_p, 35.0),
-    }
-
-    # ✅ Save to history with ALL fields
-    st.session_state.history.append({
-        "Time":             datetime.now().strftime("%H:%M:%S"),
-        "Station_Pressure": sta_p,
-        "J1_Pressure":      j1_p,
-        "J2_Pressure":      j2_p,
-        "J3_Pressure":      j3_p,
-        "Home_Pressure":    home_p,
-        "Station_Flow":     sta_f,
-        "J1_Flow":          j1_f,
-        "J2_Flow":          j2_f,
-        "J3_Flow":          j3_f,
-        "Status":           status,
-        "Confidence":       f"{max(prob)*100:.1f}%",
-    })
-
-    # ── STATUS BANNER ──
-    st.markdown(f"""
-    <div class="status-{status.lower()}">
-        {icon} Pipeline Status: {status.upper()}
-        &nbsp;&nbsp;|&nbsp;&nbsp; Confidence: {max(prob)*100:.1f}%
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ── NODE METRIC CARDS ──
-    c1, c2, c3, c4, c5 = st.columns(5)
-    cards = [
-        (c1, "Station", sta_p,  sta_f,  "Normal"),
-        (c2, "J1",      j1_p,   j1_f,   node_statuses["J1"]),
-        (c3, "J2",      j2_p,   j2_f,   node_statuses["J2"]),
-        (c4, "J3",      j3_p,   j3_f,   node_statuses["J3"]),
-        (c5, "Home",    home_p, j3_f,   node_statuses["Home"]),
-    ]
-    for col, name, pres, flow, ns in cards:
-        nc = STATUS_COLOR[ns]
-        col.markdown(f"""
-        <div style='background:#1e2130; border-radius:10px; padding:14px;
-                    text-align:center; border-top:3px solid {nc};'>
-            <div style='color:#aaa; font-size:12px;'>{name}</div>
-            <div style='color:{nc}; font-size:26px; font-weight:bold;'>{pres:.1f}m</div>
-            <div style='color:#888; font-size:11px;'>Flow: {flow:.1f} L/s</div>
-            <div style='background:{nc}; color:white; border-radius:4px;
-                        font-size:11px; padding:2px; margin-top:6px;'>{ns}</div>
+    with col:
+        st.markdown(f"""
+        <div class='asset-card {cls}'>
+            <div class='card-label'>{cfg['icon']} {cfg['label']} — {res['asset_id']}</div>
+            <div class='card-status {cls}'>{STATUS_ICON[res['overall_status']]} {res['overall_status']}</div>
+            <div class='card-detail'>{detail_txt}</div>
+            <div style='margin-top:8px;'>{badge_html}</div>
+            <div class='card-ai {ai_cls}'>{ai_txt}</div>
+            <div class='score-bar-bg'>
+                <div class='score-bar-fill' style='width:{score_norm}%;background:{score_color};'></div>
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
+st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── MAP + CHARTS ──
-    left, right = st.columns([1.3, 1])
+if any(st.session_state.history.values()):
+    st.markdown("<div class='sec-head'>SENSOR TELEMETRY</div>", unsafe_allow_html=True)
+    color_map = {"HEALTHY":"#00e676","WARNING":"#ff9800","CRITICAL":"#f44336"}
 
-    with left:
-        st.subheader("🗺️ Pipeline Network Map")
-        m = build_map(node_statuses)
-        st_folium(m, width=560, height=420, returned_objects=[])
+    for key in show_assets:
+        hist_list = st.session_state.history.get(key, [])
+        if not hist_list: continue
+        cfg  = ASSETS[key]
+        hist = pd.DataFrame(hist_list)
+        sensors = cfg["features"]
 
-    with right:
-        # Confidence chart
-        st.subheader("📊 ML Prediction Confidence")
-        fig1 = go.Figure(go.Bar(
-            x=LABELS,
-            y=[p * 100 for p in prob],
-            marker_color=["#4CAF50", "#FF9800", "#F44336"],
-            text=[f"{p*100:.1f}%" for p in prob],
-            textposition="outside",
-        ))
-        fig1.update_layout(
-            yaxis_range=[0, 115],
-            yaxis_title="Confidence (%)",
-            plot_bgcolor="#0e1117",
-            paper_bgcolor="#0e1117",
-            font_color="white",
-            height=200,
-            margin=dict(t=10, b=10),
+        fig = make_subplots(rows=1, cols=len(sensors),
+                            subplot_titles=[s.replace("_"," ") for s in sensors],
+                            horizontal_spacing=0.06)
+        for i, sensor in enumerate(sensors, 1):
+            if sensor not in hist.columns: continue
+            pt_colors = hist["status"].map(color_map).tolist()
+            ai_rows   = hist[hist["ai"] == True]
+
+            fig.add_trace(go.Scatter(x=hist["idx"], y=hist[sensor], mode="lines",
+                line=dict(color="#0d2a40", width=1.5), showlegend=False), row=1, col=i)
+            fig.add_trace(go.Scatter(x=hist["idx"], y=hist[sensor], mode="markers",
+                marker=dict(color=pt_colors, size=4), showlegend=False), row=1, col=i)
+            if len(ai_rows) > 0 and sensor in ai_rows.columns:
+                fig.add_trace(go.Scatter(x=ai_rows["idx"], y=ai_rows[sensor], mode="markers",
+                    marker=dict(symbol="diamond", color="#ff6b35", size=7,
+                                line=dict(color="#fff", width=0.5)),
+                    showlegend=False, hovertemplate="AI Anomaly<extra></extra>"), row=1, col=i)
+            fig.update_yaxes(gridcolor="#0a1a28", zeroline=False,
+                             title_text=cfg["units"].get(sensor,""),
+                             title_font=dict(size=9), row=1, col=i)
+            fig.update_xaxes(gridcolor="#0a1a28", row=1, col=i)
+
+        fig.update_layout(
+            title=dict(text=f"{cfg['icon']} {cfg['label']}",
+                       font=dict(size=13, color="#c8d8e8", family="Rajdhani"), x=0),
+            paper_bgcolor="#060a10", plot_bgcolor="#080e18",
+            font=dict(color="#4a7a9a", family="Rajdhani"),
+            height=210, margin=dict(l=10, r=10, t=45, b=25),
         )
-        st.plotly_chart(fig1, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
-        # Pressure drop chart
-        st.subheader("📉 Pressure Drop Per Segment")
-        seg_drops  = [sta_p - j1_p, j1_p - j2_p, j2_p - j3_p, j3_p - home_p]
-        seg_labels = ["Sta→J1", "J1→J2", "J2→J3", "J3→Home"]
-        seg_colors = ["#F44336" if d > 12 else "#FF9800" if d > 7 else "#4CAF50" for d in seg_drops]
-        fig2 = go.Figure(go.Bar(
-            y=seg_labels, x=seg_drops, orientation="h",
-            marker_color=seg_colors,
-            text=[f"{d:.2f}m" for d in seg_drops],
-            textposition="outside",
+    st.markdown("<div class='sec-head'>STATUS DISTRIBUTION</div>", unsafe_allow_html=True)
+    dcols = st.columns(max(1, len(show_assets)))
+    for col, key in zip(dcols, show_assets):
+        hist_list = st.session_state.history.get(key, [])
+        if not hist_list: continue
+        hist   = pd.DataFrame(hist_list)
+        counts = hist["status"].value_counts()
+        labels = ["HEALTHY","WARNING","CRITICAL"]
+        values = [counts.get(l, 0) for l in labels]
+        fig = go.Figure(go.Pie(
+            labels=labels, values=values,
+            marker_colors=["#00e676","#ff9800","#f44336"],
+            hole=0.6, textfont=dict(size=10, family="Rajdhani"),
+            hovertemplate="%{label}: %{value}<extra></extra>"
         ))
-        fig2.update_layout(
-            xaxis_title="Drop (m)",
-            plot_bgcolor="#0e1117",
-            paper_bgcolor="#0e1117",
-            font_color="white",
-            height=210,
-            margin=dict(t=10, b=10),
+        fig.update_layout(
+            title=dict(text=ASSETS[key]["label"], font=dict(size=11, color="#c8d8e8"), x=0.5),
+            paper_bgcolor="#060a10", font=dict(color="#c8d8e8"),
+            height=200, margin=dict(l=5,r=5,t=35,b=5),
+            showlegend=True, legend=dict(font=dict(size=9), bgcolor="rgba(0,0,0,0)")
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        with col:
+            st.plotly_chart(fig, use_container_width=True)
 
+st.markdown("<div class='sec-head'>ALERT LOG</div>", unsafe_allow_html=True)
+filtered = [a for a in st.session_state.alerts
+            if (a["status"]=="WARNING" and show_warn) or (a["status"]=="CRITICAL" and show_crit)]
+
+if not filtered:
+    st.markdown("<p style='color:#0f2030;font-size:11px;font-family:JetBrains Mono;'>"
+                "No alerts. Press Start to begin simulation.</p>", unsafe_allow_html=True)
 else:
-    # Default map before any prediction
-    st.info("👈 Enter sensor readings on the left and click **Analyze & Predict**")
-    default_statuses = {n: "Normal" for n in COORDS}
-    m = build_map(default_statuses)
-    st.subheader("🗺️ Pipeline Network Map")
-    st_folium(m, width=700, height=420, returned_objects=[])
+    st.markdown(f"<p style='color:#1a4060;font-size:11px;font-family:JetBrains Mono;'>"
+                f"{len(filtered)} event(s) logged</p>", unsafe_allow_html=True)
+    for a in filtered[:60]:
+        cls      = a["status"].lower()
+        ai       = a["ai"]
+        ai_badge = "AI+RULE" if ai["anomaly_detected"] else "RULE ONLY"
+        metric_str = "  |  ".join(
+            f"{k.replace('_',' ')}: {round(v,2)}{a['units'].get(k,'')}"
+            for k, v in a["metrics"].items()
+        )
+        detail = a["detail"][:150] + ("..." if len(a["detail"]) > 150 else "")
+        st.markdown(f"""
+        <div class='alert-row {cls}'>
+            {STATUS_ICON[a['status']]} &nbsp;
+            <b>{a['time']}</b> &nbsp;—&nbsp; {a['asset']} / {a['id']} &nbsp;—&nbsp;
+            <b>{a['status']}</b>
+            <span style='opacity:0.5;font-size:10px;'> [{ai_badge} | {ai['confidence']}]</span>
+            <br><span style='opacity:0.85;'>{detail}</span>
+            <br><span style='opacity:0.5;font-size:10px;'>{metric_str}</span>
+        </div>
+        """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────
-# HISTORY LOG
-# ─────────────────────────────────────────────
-if st.session_state.history:
-    st.markdown("---")
-    st.subheader("📋 History Log")
-    hdf = pd.DataFrame(st.session_state.history)
-    st.dataframe(hdf, use_container_width=True, hide_index=True)
+st.markdown(
+    "<p style='color:#0a1a28;font-size:10px;text-align:center;font-family:JetBrains Mono;'>"
+    "IEEE C57.91 / C57.92 / C37.122 / ANSI C84.1 / IEEE 738 / NESC 232 &nbsp;|&nbsp;"
+    "Isolation Forest (contamination=0.05) &nbsp;|&nbsp; RF Validator (max_depth=10)</p>",
+    unsafe_allow_html=True
+)
 
-    if len(hdf) > 1:
-        # Pressure trend
-        st.subheader("📈 Pressure Trend Over Time")
-        fig3 = go.Figure()
-        for col, color, name in [
-            ("J1_Pressure", "#2196F3", "J1"),
-            ("J2_Pressure", "#FF9800", "J2"),
-            ("J3_Pressure", "#F44336", "J3"),
-        ]:
-            fig3.add_trace(go.Scatter(
-                x=hdf["Time"], y=hdf[col],
-                mode="lines+markers", name=name,
-                line=dict(color=color, width=2),
-            ))
-        fig3.update_layout(height=300, plot_bgcolor="#0e1117",
-            paper_bgcolor="#0e1117", font_color="white",
-            xaxis_title="Time", yaxis_title="Pressure (m)")
-        st.plotly_chart(fig3, use_container_width=True)
-
-        # Flow trend
-        st.subheader("📈 Flow Rate Trend Over Time")
-        fig4 = go.Figure()
-        for col, color, name in [
-            ("Station_Flow", "#00BCD4", "Station"),
-            ("J1_Flow",      "#2196F3", "J1→J2"),
-            ("J2_Flow",      "#FF9800", "J2→J3"),
-            ("J3_Flow",      "#F44336", "J3→Home"),
-        ]:
-            fig4.add_trace(go.Scatter(
-                x=hdf["Time"], y=hdf[col],
-                mode="lines+markers", name=name,
-                line=dict(color=color, width=2),
-            ))
-        fig4.update_layout(height=300, plot_bgcolor="#0e1117",
-            paper_bgcolor="#0e1117", font_color="white",
-            xaxis_title="Time", yaxis_title="Flow (L/s)")
-        st.plotly_chart(fig4, use_container_width=True)
-
-st.markdown("---")
-st.caption("💧 Water Pipeline Health Monitor | EPANET + ML Powered")
+if st.session_state.running:
+    time.sleep(speed_map[speed])
+    st.rerun()
